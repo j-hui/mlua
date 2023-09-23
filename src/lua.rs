@@ -1,19 +1,39 @@
+use std::prelude::v1::*;
+
 use std::any::TypeId;
 use std::cell::{RefCell, UnsafeCell};
+use std::ffi::{c_char, c_int, c_void};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
-use std::os::raw::{c_char, c_int, c_void};
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe, Location};
+#[cfg(feature = "panic-safety")]
+use std::panic::{catch_unwind, resume_unwind};
+use std::panic::{AssertUnwindSafe, Location};
 use std::ptr::NonNull;
 use std::result::Result as StdResult;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex};
 use std::{mem, ptr, str};
 
+#[cfg(not(any(feature = "std", target_has_atomic = "ptr")))]
+use std::rc::Rc as Arc;
+#[cfg(any(feature = "std", target_has_atomic = "ptr"))]
+use std::sync::Arc;
+
+#[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
+#[cfg(not(feature = "std"))]
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
+#[cfg(any(
+    feature = "lua52",
+    feature = "lua51",
+    feature = "luajit",
+    feature = "luau"
+))]
+use num_traits::Float;
 
 use crate::chunk::{AsChunk, Chunk, ChunkMode};
 use crate::error::{Error, Result};
@@ -27,7 +47,7 @@ use crate::table::Table;
 use crate::thread::Thread;
 use crate::types::{
     AppData, AppDataRef, AppDataRefMut, Callback, CallbackUpvalue, DestructedUserdata, Integer,
-    LightUserData, LuaRef, MaybeSend, Number, RegistryKey,
+    LightUserData, LuaRef, MaybeSend, Number, RegistryKey, UnrefList,
 };
 use crate::userdata::{AnyUserData, MetaMethod, UserData, UserDataCell};
 use crate::userdata_impl::{UserDataProxy, UserDataRegistry};
@@ -35,8 +55,10 @@ use crate::util::{
     self, assert_stack, check_stack, get_destructed_userdata_metatable, get_gc_metatable,
     get_gc_userdata, get_main_state, get_userdata, init_error_registry, init_gc_metatable,
     init_userdata_metatable, pop_error, push_gc_userdata, push_string, push_table, rawset_field,
-    safe_pcall, safe_xpcall, short_type_name, StackGuard, WrappedFailure,
+    short_type_name, StackGuard, WrappedFailure,
 };
+#[cfg(feature = "panic-safety")]
+use crate::util::{safe_pcall, safe_xpcall};
 use crate::value::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, MultiValue, Nil, Value};
 
 #[cfg(not(feature = "lua54"))]
@@ -87,7 +109,7 @@ pub(crate) struct ExtraData {
     last_checked_userdata_mt: (*const c_void, Option<TypeId>),
 
     // When Lua instance dropped, setting `None` would prevent collecting `RegistryKey`s
-    registry_unref_list: Arc<Mutex<Option<Vec<c_int>>>>,
+    registry_unref_list: UnrefList,
 
     // Container to store arbitrary data (extensions)
     app_data: AppData,
@@ -169,6 +191,7 @@ pub struct LuaOptions {
     ///
     /// [`pcall`]: https://www.lua.org/manual/5.4/manual.html#pdf-pcall
     /// [`xpcall`]: https://www.lua.org/manual/5.4/manual.html#pdf-xpcall
+    #[cfg(feature = "panic-safety")]
     pub catch_rust_panics: bool,
 
     /// Max size of thread (coroutine) object pool used to execute asynchronous functions.
@@ -194,6 +217,7 @@ impl LuaOptions {
     /// Returns a new instance of `LuaOptions` with default parameters.
     pub const fn new() -> Self {
         LuaOptions {
+            #[cfg(feature = "panic-safety")]
             catch_rust_panics: true,
             #[cfg(feature = "async")]
             thread_pool_size: 0,
@@ -204,6 +228,7 @@ impl LuaOptions {
     ///
     /// [`catch_rust_panics`]: #structfield.catch_rust_panics
     #[must_use]
+    #[cfg(feature = "panic-safety")]
     pub const fn catch_rust_panics(mut self, enabled: bool) -> Self {
         self.catch_rust_panics = enabled;
         self
@@ -260,7 +285,17 @@ impl Drop for ExtraData {
             self.inner.assume_init_drop();
         }
 
-        *mlua_expect!(self.registry_unref_list.lock(), "unref list poisoned") = None;
+        #[cfg(feature = "std")]
+        {
+            *mlua_expect!(self.registry_unref_list.lock(), "unref list poisoned") = None;
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            *mlua_expect!(
+                self.registry_unref_list.try_borrow_mut(),
+                "unref list poisoned"
+            ) = None;
+        }
         if let Some(mem_state) = self.mem_state {
             drop(unsafe { Box::from_raw(mem_state.as_ptr()) });
         }
@@ -383,6 +418,9 @@ impl Lua {
 
     /// Creates a new Lua state with required `libs` and `options`
     unsafe fn inner_new(libs: StdLib, options: LuaOptions) -> Lua {
+        #[cfg(not(feature = "panic-safety"))]
+        let _ = options;
+
         let mut mem_state: *mut MemoryState = Box::into_raw(Box::default());
         let mut state = ffi::lua_newstate(ALLOCATOR, mem_state as *mut c_void);
         // If state is null then switch to Lua internal allocator
@@ -412,6 +450,7 @@ impl Lua {
         );
         (*extra).libs |= libs;
 
+        #[cfg(feature = "panic-safety")]
         if !options.catch_rust_panics {
             mlua_expect!(
                 (|| -> Result<()> {
@@ -510,7 +549,7 @@ impl Lua {
             registered_userdata: FxHashMap::default(),
             registered_userdata_mt: FxHashMap::default(),
             last_checked_userdata_mt: (ptr::null(), None),
-            registry_unref_list: Arc::new(Mutex::new(Some(Vec::new()))),
+            registry_unref_list: UnrefList::default(),
             app_data: AppData::default(),
             safe: false,
             libs: StdLib::NONE,
@@ -2061,7 +2100,12 @@ impl Lua {
 
             // Try to reuse previously allocated slot
             let unref_list = (*self.extra.get()).registry_unref_list.clone();
+            #[cfg(feature = "std")]
             let free_registry_id = mlua_expect!(unref_list.lock(), "unref list poisoned")
+                .as_mut()
+                .and_then(|x| x.pop());
+            #[cfg(not(feature = "std"))]
+            let free_registry_id = mlua_expect!(unref_list.try_borrow_mut(), "unref list poisoned")
                 .as_mut()
                 .and_then(|x| x.pop());
             if let Some(registry_id) = free_registry_id {
@@ -2189,8 +2233,14 @@ impl Lua {
     pub fn expire_registry_values(&self) {
         let state = self.state();
         unsafe {
+            #[cfg(feature = "std")]
             let mut unref_list = mlua_expect!(
                 (*self.extra.get()).registry_unref_list.lock(),
+                "unref list poisoned"
+            );
+            #[cfg(not(feature = "std"))]
+            let mut unref_list = mlua_expect!(
+                (*self.extra.get()).registry_unref_list.try_borrow_mut(),
                 "unref list poisoned"
             );
             let unref_list = mem::replace(&mut *unref_list, Some(Vec::new()));
@@ -2426,6 +2476,7 @@ impl Lua {
                         ffi::lua_pop(state, 1);
                         Value::Error(err)
                     }
+                    #[cfg(feature = "panic-safety")]
                     Some(WrappedFailure::Panic(panic)) => {
                         if let Some(panic) = panic.take() {
                             ffi::lua_pop(state, 1);
@@ -2521,6 +2572,7 @@ impl Lua {
                 match get_gc_userdata::<WrappedFailure>(state, idx, wrapped_failure_mt_ptr).as_mut()
                 {
                     Some(WrappedFailure::Error(err)) => Value::Error(err.clone()),
+                    #[cfg(feature = "panic-safety")]
                     Some(WrappedFailure::Panic(panic)) => {
                         if let Some(panic) = panic.take() {
                             resume_unwind(panic);
@@ -3234,7 +3286,17 @@ struct StateGuard<'a>(&'a LuaInner, *mut ffi::lua_State);
 
 impl<'a> StateGuard<'a> {
     fn new(inner: &'a LuaInner, mut state: *mut ffi::lua_State) -> Self {
-        state = inner.state.swap(state, Ordering::Relaxed);
+        #[cfg(any(feature = "std", target_has_atomic = "ptr"))]
+        {
+            state = inner.state.swap(state, Ordering::Relaxed);
+        }
+        #[cfg(not(any(feature = "std", target_has_atomic = "ptr")))]
+        {
+            // On platforms without atomic loads, just manually swap
+            let inner_state = inner.state.load(Ordering::Relaxed);
+            inner.state.store(state, Ordering::Relaxed);
+            state = inner_state;
+        }
         Self(inner, state)
     }
 }
@@ -3368,6 +3430,11 @@ where
     // to store a wrapped failure (error or panic) *before* we proceed.
     let prealloc_failure = PreallocatedFailure::reserve(state, extra);
 
+    #[cfg(not(feature = "panic-safety"))]
+    fn catch_unwind<F: FnOnce() -> R, R>(f: F) -> Result<R> {
+        Ok(f())
+    }
+
     match catch_unwind(AssertUnwindSafe(|| f(nargs))) {
         Ok(Ok(r)) => {
             // Return unused `WrappedFailure` to the pool
@@ -3396,6 +3463,9 @@ where
 
             ffi::lua_error(state)
         }
+        #[cfg(not(feature = "panic-safety"))]
+        Err(p) => unreachable!("panic = abort, but encountered {:?}", p),
+        #[cfg(feature = "panic-safety")]
         Err(p) => {
             let wrapped_panic = prealloc_failure.r#use(state, extra);
             ptr::write(wrapped_panic, WrappedFailure::Panic(Some(p)));

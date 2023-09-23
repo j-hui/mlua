@@ -1,6 +1,7 @@
 //! (De)Serialization support using serde.
+use std::prelude::v1::*;
 
-use std::os::raw::c_void;
+use std::ffi::c_void;
 
 use serde::{de::DeserializeOwned, ser::Serialize};
 

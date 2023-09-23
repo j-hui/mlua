@@ -75,6 +75,9 @@
 // warnings at all.
 #![doc(test(attr(deny(warnings))))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![no_std]
+
+extern crate no_std_compat2 as std;
 
 #[macro_use]
 mod macros;
@@ -106,7 +109,9 @@ pub mod prelude;
 pub use ffi::{self, lua_CFunction, lua_State};
 
 pub use crate::chunk::{AsChunk, Chunk, ChunkMode};
-pub use crate::error::{Error, ErrorContext, ExternalError, ExternalResult, Result};
+pub use crate::error::{Error, ErrorContext, Result};
+#[cfg(feature = "std")]
+pub use crate::error::{ExternalError, ExternalResult};
 pub use crate::function::{Function, FunctionInfo};
 pub use crate::hook::{Debug, DebugEvent, DebugNames, DebugSource, DebugStack};
 pub use crate::lua::{GCMode, Lua, LuaOptions};

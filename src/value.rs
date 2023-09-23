@@ -1,12 +1,18 @@
+use std::prelude::v1::*;
+
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::ffi::{c_int, c_void};
 use std::iter::{self, FromIterator};
 use std::ops::Index;
-use std::os::raw::{c_int, c_void};
 use std::string::String as StdString;
-use std::sync::Arc;
 use std::{fmt, mem, ptr, slice, str, vec};
+
+#[cfg(not(any(feature = "std", target_has_atomic = "ptr")))]
+use std::rc::Rc as Arc;
+#[cfg(any(feature = "std", target_has_atomic = "ptr"))]
+use std::sync::Arc;
 
 use num_traits::FromPrimitive;
 

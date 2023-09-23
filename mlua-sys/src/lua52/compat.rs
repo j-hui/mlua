@@ -3,11 +3,14 @@
 //! Based on github.com/keplerproject/lua-compat-5.3
 
 use std::convert::TryInto;
-use std::os::raw::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
 use super::lauxlib::*;
 use super::lua::*;
+
+#[cfg(not(feature = "std"))]
+use num_traits::Float; // for f64::abs()
 
 #[inline(always)]
 unsafe fn compat53_reverse(L: *mut lua_State, mut a: c_int, mut b: c_int) {

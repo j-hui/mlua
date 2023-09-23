@@ -1,7 +1,8 @@
 //! Contains definitions from `luacode.h`.
 
-use std::os::raw::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::slice;
+use std::vec::Vec;
 
 #[repr(C)]
 pub struct lua_CompileOptions {

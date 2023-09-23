@@ -1,6 +1,8 @@
+use std::prelude::v1::*;
+
+use std::ffi::c_int;
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut};
-use std::os::raw::c_int;
 use std::result::Result as StdResult;
 
 use crate::error::Result;

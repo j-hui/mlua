@@ -4,8 +4,11 @@
 #![allow(clippy::missing_safety_doc)]
 #![doc(test(attr(deny(warnings))))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![no_std]
 
-use std::os::raw::c_int;
+extern crate no_std_compat2 as std;
+
+use std::ffi::c_int;
 
 #[cfg(any(feature = "lua54", doc))]
 pub use lua54::*;
